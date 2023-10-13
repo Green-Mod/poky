@@ -1,6 +1,4 @@
 #
-# Copyright BitBake Contributors
-#
 # SPDX-License-Identifier: GPL-2.0-only
 #
 """
@@ -9,16 +7,14 @@ Based on the svn "Fetch" implementation.
 
 """
 
+import  os
+import  sys
 import logging
-import os
-import re
 import  bb
 from    bb.fetch2 import FetchMethod
 from    bb.fetch2 import FetchError
 from    bb.fetch2 import MissingParameterError
 from    bb.fetch2 import runfetchcmd
-
-logger = logging.getLogger(__name__)
 
 class Osc(FetchMethod):
     """Class to fetch a module or modules from Opensuse build server
@@ -39,7 +35,6 @@ class Osc(FetchMethod):
         # Create paths to osc checkouts
         oscdir = d.getVar("OSCDIR") or (d.getVar("DL_DIR") + "/osc")
         relpath = self._strip_leading_slashes(ud.path)
-        ud.oscdir = oscdir
         ud.pkgdir = os.path.join(oscdir, ud.host)
         ud.moddir = os.path.join(ud.pkgdir, relpath, ud.module)
 
@@ -47,13 +42,13 @@ class Osc(FetchMethod):
             ud.revision = ud.parm['rev']
         else:
             pv = d.getVar("PV", False)
-            rev = bb.fetch2.srcrev_internal_helper(ud, d, '')
-            if rev:
+            rev = bb.fetch2.srcrev_internal_helper(ud, d)
+            if rev and rev != True:
                 ud.revision = rev
             else:
                 ud.revision = ""
 
-        ud.localfile = d.expand('%s_%s_%s.tar.gz' % (ud.module.replace('/', '.'), relpath.replace('/', '.'), ud.revision))
+        ud.localfile = d.expand('%s_%s_%s.tar.gz' % (ud.module.replace('/', '.'), ud.path.replace('/', '.'), ud.revision))
 
     def _buildosccommand(self, ud, d, command):
         """
@@ -63,61 +58,38 @@ class Osc(FetchMethod):
 
         basecmd = d.getVar("FETCHCMD_osc") or "/usr/bin/env osc"
 
-        proto = ud.parm.get('protocol', 'https')
+        proto = ud.parm.get('protocol', 'ocs')
 
         options = []
 
         config = "-c %s" % self.generate_config(ud, d)
 
-        if getattr(ud, 'revision', ''):
+        if ud.revision:
             options.append("-r %s" % ud.revision)
 
         coroot = self._strip_leading_slashes(ud.path)
 
         if command == "fetch":
-            osccmd = "%s %s -A %s://%s co %s/%s %s" % (basecmd, config, proto, ud.host, coroot, ud.module, " ".join(options))
+            osccmd = "%s %s co %s/%s %s" % (basecmd, config, coroot, ud.module, " ".join(options))
         elif command == "update":
-            osccmd = "%s %s -A %s://%s up %s" % (basecmd, config, proto, ud.host, " ".join(options))
-        elif command == "api_source":
-            osccmd = "%s %s -A %s://%s api source/%s/%s" % (basecmd, config, proto, ud.host, coroot, ud.module)
+            osccmd = "%s %s up %s" % (basecmd, config, " ".join(options))
         else:
             raise FetchError("Invalid osc command %s" % command, ud.url)
 
         return osccmd
-
-    def _latest_revision(self, ud, d, name):
-        """
-        Fetch latest revision for the given package
-        """
-        api_source_cmd = self._buildosccommand(ud, d, "api_source")
-
-        output = runfetchcmd(api_source_cmd, d)
-        match = re.match(r'<directory ?.* rev="(\d+)".*>', output)
-        if match is None:
-            raise FetchError("Unable to parse osc response", ud.url)
-        return match.groups()[0]
-
-    def _revision_key(self, ud, d, name):
-        """
-        Return a unique key for the url
-        """
-        # Collapse adjacent slashes
-        slash_re = re.compile(r"/+")
-        rev = getattr(ud, 'revision', "latest")
-        return "osc:%s%s.%s.%s" % (ud.host, slash_re.sub(".", ud.path), name, rev)
 
     def download(self, ud, d):
         """
         Fetch url
         """
 
-        logger.debug2("Fetch: checking for module directory '" + ud.moddir + "'")
+        logger.debug(2, "Fetch: checking for module directory '" + ud.moddir + "'")
 
-        if os.access(ud.moddir, os.R_OK):
+        if os.access(os.path.join(d.getVar('OSCDIR'), ud.path, ud.module), os.R_OK):
             oscupdatecmd = self._buildosccommand(ud, d, "update")
             logger.info("Update "+ ud.url)
             # update sources there
-            logger.debug("Running %s", oscupdatecmd)
+            logger.debug(1, "Running %s", oscupdatecmd)
             bb.fetch2.check_network_access(d, oscupdatecmd, ud.url)
             runfetchcmd(oscupdatecmd, d, workdir=ud.moddir)
         else:
@@ -125,7 +97,7 @@ class Osc(FetchMethod):
             logger.info("Fetch " + ud.url)
             # check out sources there
             bb.utils.mkdirhier(ud.pkgdir)
-            logger.debug("Running %s", oscfetchcmd)
+            logger.debug(1, "Running %s", oscfetchcmd)
             bb.fetch2.check_network_access(d, oscfetchcmd, ud.url)
             runfetchcmd(oscfetchcmd, d, workdir=ud.pkgdir)
 
@@ -141,23 +113,20 @@ class Osc(FetchMethod):
         Generate a .oscrc to be used for this run.
         """
 
-        config_path = os.path.join(ud.oscdir, "oscrc")
-        if not os.path.exists(ud.oscdir):
-            bb.utils.mkdirhier(ud.oscdir)
-
+        config_path = os.path.join(d.getVar('OSCDIR'), "oscrc")
         if (os.path.exists(config_path)):
             os.remove(config_path)
 
         f = open(config_path, 'w')
-        proto = ud.parm.get('protocol', 'https')
         f.write("[general]\n")
-        f.write("apiurl = %s://%s\n" % (proto, ud.host))
+        f.write("apisrv = %s\n" % ud.host)
+        f.write("scheme = http\n")
         f.write("su-wrapper = su -c\n")
         f.write("build-root = %s\n" % d.getVar('WORKDIR'))
         f.write("urllist = %s\n" % d.getVar("OSCURLLIST"))
         f.write("extra-pkgs = gzip\n")
         f.write("\n")
-        f.write("[%s://%s]\n" % (proto, ud.host))
+        f.write("[%s]\n" % ud.host)
         f.write("user = %s\n" % ud.parm["user"])
         f.write("pass = %s\n" % ud.parm["pswd"])
         f.close()
