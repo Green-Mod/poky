@@ -19,8 +19,8 @@ from orm.models import Target_Installed_Package, Target_File
 from orm.models import TargetKernelFile, TargetSDKFile, Target_Image_File
 from orm.models import BitbakeVersion, CustomImageRecipe
 
-from django.urls import reverse, resolve
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.urlresolvers import reverse, resolve
+from django.core.exceptions import MultipleObjectsReturned, ObjectDoesNotExist
 from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 from django.http import HttpResponseNotFound, JsonResponse
 from django.utils import timezone
@@ -33,8 +33,6 @@ from os.path import dirname
 import mimetypes
 
 import logging
-
-from toastermain.logs import log_view_mixin
 
 logger = logging.getLogger("toaster")
 
@@ -53,12 +51,11 @@ class MimeTypeFinder(object):
     def get_mimetype(self, path):
         guess = mimetypes.guess_type(path, self._strict)
         guessed_type = guess[0]
-        if guessed_type is None:
+        if guessed_type == None:
             guessed_type = 'application/octet-stream'
         return guessed_type
 
 # single point to add global values into the context before rendering
-@log_view_mixin
 def toaster_render(request, page, context):
     context['project_enable'] = project_enable
     context['project_specific'] = is_project_specific
@@ -129,7 +126,7 @@ def _lv_to_dict(prj, x = None):
     return {"id": x.pk,
             "name": x.layer.name,
             "tooltip": "%s | %s" % (x.layer.vcs_url,x.get_vcs_reference()),
-            "detail": "(%s" % x.layer.vcs_url + (")" if x.release is None else " | "+x.get_vcs_reference()+")"),
+            "detail": "(%s" % x.layer.vcs_url + (")" if x.release == None else " | "+x.get_vcs_reference()+")"),
             "giturl": x.layer.vcs_url,
             "layerdetailurl" : reverse('layerdetails', args=(prj.id,x.pk)),
             "revision" : x.get_vcs_reference(),
@@ -355,7 +352,7 @@ def _get_parameters_values(request, default_count, default_order):
 # set cookies for parameters. this is usefull in case parameters are set
 # manually from the GET values of the link
 def _set_parameters_values(pagesize, orderby, request):
-    from django.urls import resolve
+    from django.core.urlresolvers import resolve
     current_url = resolve(request.path_info).url_name
     request.session['%s_count' % current_url] = pagesize
     request.session['%s_orderby' % current_url] =orderby
@@ -667,18 +664,18 @@ def recipe_packages(request, build_id, recipe_id):
     _set_parameters_values(pagesize, orderby, request)
     return response
 
+from django.core.serializers.json import DjangoJSONEncoder
 from django.http import HttpResponse
-@log_view_mixin
 def xhr_dirinfo(request, build_id, target_id):
     top = request.GET.get('start', '/')
     return HttpResponse(_get_dir_entries(build_id, target_id, top), content_type = "application/json")
 
 from django.utils.functional import Promise
-from django.utils.encoding import force_str
+from django.utils.encoding import force_text
 class LazyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Promise):
-            return force_str(obj)
+            return force_text(obj)
         return super(LazyEncoder, self).default(obj)
 
 from toastergui.templatetags.projecttags import filtered_filesizeformat
@@ -722,7 +719,7 @@ def _get_dir_entries(build_id, target_id, start):
                 resolved_id = o.sym_target_id
                 resolved_path = o.path
                 if target_packages.count():
-                    while resolved_id != "" and resolved_id is not None:
+                    while resolved_id != "" and resolved_id != None:
                         tf = Target_File.objects.get(pk=resolved_id)
                         resolved_path = tf.path
                         resolved_id = tf.sym_target_id
@@ -734,10 +731,10 @@ def _get_dir_entries(build_id, target_id, start):
                         entry['package_id'] = str(p.id)
                         entry['package'] = p.name
                 # don't use resolved path from above, show immediate link-to
-                if o.sym_target_id != "" and o.sym_target_id is not None:
+                if o.sym_target_id != "" and o.sym_target_id != None:
                     entry['link_to'] = Target_File.objects.get(pk=o.sym_target_id).path
             entry['size'] = filtered_filesizeformat(o.size)
-            if entry['link_to'] is not None:
+            if entry['link_to'] != None:
                 entry['permission'] = node_str[o.inodetype] + o.permission
             else:
                 entry['permission'] = node_str[o.inodetype] + o.permission
@@ -759,7 +756,7 @@ def dirinfo(request, build_id, target_id, file_path=None):
     objects = _get_dir_entries(build_id, target_id, '/')
     packages_sum = Package.objects.filter(id__in=Target_Installed_Package.objects.filter(target_id=target_id).values('package_id')).aggregate(Sum('installed_size'))
     dir_list = None
-    if file_path is not None:
+    if file_path != None:
         """
         Link from the included package detail file list page and is
         requesting opening the dir info to a specific file path.
@@ -1033,15 +1030,15 @@ def _get_package_dependency_count(package, target_id, is_installed):
 
 def _get_package_alias(package):
     alias = package.installed_name
-    if alias is not None and alias != '' and alias != package.name:
+    if alias != None and alias != '' and alias != package.name:
         return alias
     else:
         return ''
 
 def _get_fullpackagespec(package):
     r = package.name
-    version_good = package.version is not None and  package.version != ''
-    revision_good = package.revision is not None and package.revision != ''
+    version_good = package.version != None and  package.version != ''
+    revision_good = package.revision != None and package.revision != ''
     if version_good or revision_good:
         r += '_'
         if version_good:
@@ -1195,7 +1192,7 @@ def package_included_reverse_dependencies(request, build_id, target_id, package_
         return _redirect_parameters( 'package_included_reverse_dependencies', request.GET, mandatory_parameters, build_id = build_id, target_id = target_id, package_id = package_id)
     (filter_string, search_term, ordering_string) = _search_tuple(request, Package_File)
 
-    queryset = Package_Dependency.objects.select_related('depends_on').filter(depends_on=package_id, target_id=target_id, dep_type=Package_Dependency.TYPE_TRDEPENDS)
+    queryset = Package_Dependency.objects.select_related('depends_on__name', 'depends_on__size').filter(depends_on=package_id, target_id=target_id, dep_type=Package_Dependency.TYPE_TRDEPENDS)
     objects = _get_queryset(Package_Dependency, queryset, filter_string, search_term, ordering_string, 'package__name')
 
     package = Package.objects.get(pk=package_id)
@@ -1343,7 +1340,7 @@ def json_build(request,build_id):
 
 import toastermain.settings
 
-from orm.models import Project, ProjectLayer, ProjectVariable
+from orm.models import Project, ProjectLayer, ProjectTarget, ProjectVariable
 from bldcontrol.models import  BuildEnvironment
 
 # we have a set of functions if we're in managed mode, or
@@ -1352,8 +1349,10 @@ from bldcontrol.models import  BuildEnvironment
 if True:
     from django.contrib.auth.models import User
     from django.contrib.auth import authenticate, login
+    from django.contrib.auth.decorators import login_required
 
-    from orm.models import LayerSource, ToasterSetting, Release
+    from orm.models import LayerSource, ToasterSetting, Release, Machine, LayerVersionDependency
+    from bldcontrol.models import BuildRequest
 
     import traceback
 
@@ -1368,8 +1367,8 @@ if True:
 
         template = "newproject.html"
         context = {
-            'email': request.user.email if request.user.is_authenticated else '',
-            'username': request.user.username if request.user.is_authenticated else '',
+            'email': request.user.email if request.user.is_authenticated() else '',
+            'username': request.user.username if request.user.is_authenticated() else '',
             'releases': Release.objects.order_by("description"),
         }
 
@@ -1395,7 +1394,7 @@ if True:
                     # set alert for missing fields
                     raise BadParameterException("Fields missing: %s" % ", ".join(missing))
 
-                if not request.user.is_authenticated:
+                if not request.user.is_authenticated():
                     user = authenticate(username = request.POST.get('username', '_anonuser'), password = 'nopass')
                     if user is None:
                         user = User.objects.create_user(username = request.POST.get('username', '_anonuser'), email = request.POST.get('email', ''), password = "nopass")
@@ -1408,7 +1407,7 @@ if True:
                     if not os.path.isdir('%s/conf' % request.POST['importdir']):
                         raise BadParameterException("Bad path or missing 'conf' directory (%s)" % request.POST['importdir'])
                     from django.core import management
-                    management.call_command('buildimport', '--command=import', '--name=%s' % request.POST['projectname'], '--path=%s' % request.POST['importdir'])
+                    management.call_command('buildimport', '--command=import', '--name=%s' % request.POST['projectname'], '--path=%s' % request.POST['importdir'], interactive=False)
                     prj = Project.objects.get(name = request.POST['projectname'])
                     prj.merged_attr = True
                     prj.save()
@@ -1442,8 +1441,8 @@ if True:
         project = Project.objects.get(pk=pid)
         template = "newproject_specific.html"
         context = {
-            'email': request.user.email if request.user.is_authenticated else '',
-            'username': request.user.username if request.user.is_authenticated else '',
+            'email': request.user.email if request.user.is_authenticated() else '',
+            'username': request.user.username if request.user.is_authenticated() else '',
             'releases': Release.objects.order_by("description"),
             'projectname': project.name,
             'project_pk': project.pk,
@@ -1473,7 +1472,7 @@ if True:
                     # set alert for missing fields
                     raise BadParameterException("Fields missing: %s" % ", ".join(missing))
 
-                if not request.user.is_authenticated:
+                if not request.user.is_authenticated():
                     user = authenticate(username = request.POST.get('username', '_anonuser'), password = 'nopass')
                     if user is None:
                         user = User.objects.create_user(username = request.POST.get('username', '_anonuser'), email = request.POST.get('email', ''), password = "nopass")
@@ -1616,7 +1615,6 @@ if True:
 
     from django.views.decorators.csrf import csrf_exempt
     @csrf_exempt
-    @log_view_mixin
     def xhr_testreleasechange(request, pid):
         def response(data):
             return HttpResponse(jsonfilter(data),
@@ -1653,7 +1651,6 @@ if True:
         except Exception as e:
             return response({"error": str(e) })
 
-    @log_view_mixin
     def xhr_configvaredit(request, pid):
         try:
             prj = Project.objects.get(id = pid)
@@ -1689,12 +1686,12 @@ if True:
                 t=request.POST['configvarDel'].strip()
                 pt = ProjectVariable.objects.get(pk = int(t)).delete()
 
-            # return all project settings, filter out disallowed and elsewhere-managed variables
-            vars_managed,vars_fstypes,vars_disallowed = get_project_configvars_context()
+            # return all project settings, filter out blacklist and elsewhere-managed variables
+            vars_managed,vars_fstypes,vars_blacklist = get_project_configvars_context()
             configvars_query = ProjectVariable.objects.filter(project_id = pid).all()
             for var in vars_managed:
                 configvars_query = configvars_query.exclude(name = var)
-            for var in vars_disallowed:
+            for var in vars_blacklist:
                 configvars_query = configvars_query.exclude(name = var)
 
             return_data = {
@@ -1714,7 +1711,7 @@ if True:
             except ProjectVariable.DoesNotExist:
                 pass
             try:
-                return_data['image_install:append'] = ProjectVariable.objects.get(project = prj, name = "IMAGE_INSTALL:append").value,
+                return_data['image_install_append'] = ProjectVariable.objects.get(project = prj, name = "IMAGE_INSTALL_append").value,
             except ProjectVariable.DoesNotExist:
                 pass
             try:
@@ -1732,7 +1729,6 @@ if True:
             return HttpResponse(json.dumps({"error":str(e) + "\n" + traceback.format_exc()}), content_type = "application/json")
 
 
-    @log_view_mixin
     def customrecipe_download(request, pid, recipe_id):
         recipe = get_object_or_404(CustomImageRecipe, pk=recipe_id)
 
@@ -1788,7 +1784,7 @@ if True:
             'MACHINE', 'BBLAYERS'
         }
 
-        vars_disallowed  = {
+        vars_blacklist  = {
             'PARALLEL_MAKE','BB_NUMBER_THREADS',
             'BB_DISKMON_DIRS','BB_NUMBER_THREADS','CVS_PROXY_HOST','CVS_PROXY_PORT',
             'PARALLEL_MAKE','TMPDIR',
@@ -1797,7 +1793,7 @@ if True:
 
         vars_fstypes = Target_Image_File.SUFFIXES
 
-        return(vars_managed,sorted(vars_fstypes),vars_disallowed)
+        return(vars_managed,sorted(vars_fstypes),vars_blacklist)
 
     def projectconf(request, pid):
 
@@ -1806,12 +1802,12 @@ if True:
         except Project.DoesNotExist:
             return HttpResponseNotFound("<h1>Project id " + pid + " is unavailable</h1>")
 
-        # remove disallowed and externally managed varaibles from this list
-        vars_managed,vars_fstypes,vars_disallowed = get_project_configvars_context()
+        # remove blacklist and externally managed varaibles from this list
+        vars_managed,vars_fstypes,vars_blacklist = get_project_configvars_context()
         configvars = ProjectVariable.objects.filter(project_id = pid).all()
         for var in vars_managed:
             configvars = configvars.exclude(name = var)
-        for var in vars_disallowed:
+        for var in vars_blacklist:
             configvars = configvars.exclude(name = var)
 
         context = {
@@ -1819,7 +1815,7 @@ if True:
             'configvars':       configvars,
             'vars_managed':     vars_managed,
             'vars_fstypes':     vars_fstypes,
-            'vars_disallowed':  vars_disallowed,
+            'vars_blacklist':   vars_blacklist,
         }
 
         try:
@@ -1846,7 +1842,7 @@ if True:
         except ProjectVariable.DoesNotExist:
             pass
         try:
-            context['image_install:append'] =  ProjectVariable.objects.get(project = prj, name = "IMAGE_INSTALL:append").value
+            context['image_install_append'] =  ProjectVariable.objects.get(project = prj, name = "IMAGE_INSTALL_append").value
             context['image_install_append_defined'] = "1"
         except ProjectVariable.DoesNotExist:
             pass

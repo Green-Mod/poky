@@ -6,19 +6,24 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
 
-from django.urls import reverse
+from django.views.decorators.cache import cache_control
+from django.core.urlresolvers import reverse
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 from django.http import HttpResponseBadRequest, HttpResponse
+from django.utils import timezone
+from django.utils.html import escape
+from datetime import timedelta
+from django.utils import formats
+from toastergui.templatetags.projecttags import json as jsonfilter
+import json
 import os
 import tempfile
 import subprocess
 import toastermain
 from django.views.decorators.csrf import csrf_exempt
 
-from toastermain.logs import log_view_mixin
-
 
 @csrf_exempt
-@log_view_mixin
 def eventfile(request):
     """ Receives a file by POST, and runs toaster-eventreply on this file """
     if request.method != "POST":

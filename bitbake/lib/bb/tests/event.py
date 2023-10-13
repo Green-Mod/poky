@@ -6,18 +6,17 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
 
-import collections
-import importlib
+import unittest
+import bb
 import logging
-import pickle
+import bb.compat
+import bb.event
+import importlib
 import threading
 import time
-import unittest
+import pickle
 from unittest.mock import Mock
 from unittest.mock import call
-
-import bb
-import bb.event
 from bb.msg import BBLogFormatter
 
 
@@ -76,7 +75,7 @@ class EventHandlingTest(unittest.TestCase):
 
     def _create_test_handlers(self):
         """ Method used to create a test handler ordered dictionary """
-        test_handlers = collections.OrderedDict()
+        test_handlers = bb.compat.OrderedDict()
         test_handlers["handler1"] = self._test_process.handler1
         test_handlers["handler2"] = self._test_process.handler2
         return test_handlers
@@ -97,7 +96,7 @@ class EventHandlingTest(unittest.TestCase):
 
     def test_clean_class_handlers(self):
         """ Test clean_class_handlers method """
-        cleanDict = collections.OrderedDict()
+        cleanDict = bb.compat.OrderedDict()
         self.assertEqual(cleanDict,
                          bb.event.clean_class_handlers())
 
@@ -157,7 +156,7 @@ class EventHandlingTest(unittest.TestCase):
                                  self._test_process.event_handler,
                                  event,
                                  None)
-        self._test_process.event_handler.assert_called_once_with(event, None)
+        self._test_process.event_handler.assert_called_once_with(event)
 
     def test_fire_class_handlers(self):
         """ Test fire_class_handlers method """
@@ -175,10 +174,10 @@ class EventHandlingTest(unittest.TestCase):
         bb.event.fire_class_handlers(event1, None)
         bb.event.fire_class_handlers(event2, None)
         bb.event.fire_class_handlers(event2, None)
-        expected_event_handler1 = [call(event1, None)]
-        expected_event_handler2 = [call(event1, None),
-                                   call(event2, None),
-                                   call(event2, None)]
+        expected_event_handler1 = [call(event1)]
+        expected_event_handler2 = [call(event1),
+                                   call(event2),
+                                   call(event2)]
         self.assertEqual(self._test_process.event_handler1.call_args_list,
                          expected_event_handler1)
         self.assertEqual(self._test_process.event_handler2.call_args_list,
@@ -205,7 +204,7 @@ class EventHandlingTest(unittest.TestCase):
         bb.event.fire_class_handlers(event2, None)
         bb.event.fire_class_handlers(event2, None)
         expected_event_handler1 = []
-        expected_event_handler2 = [call(event1, None)]
+        expected_event_handler2 = [call(event1)]
         self.assertEqual(self._test_process.event_handler1.call_args_list,
                          expected_event_handler1)
         self.assertEqual(self._test_process.event_handler2.call_args_list,
@@ -223,7 +222,7 @@ class EventHandlingTest(unittest.TestCase):
         self.assertEqual(result, bb.event.Registered)
         bb.event.fire_class_handlers(event1, None)
         bb.event.fire_class_handlers(event2, None)
-        expected = [call(event1, None), call(event2, None)]
+        expected = [call(event1), call(event2)]
         self.assertEqual(self._test_process.event_handler1.call_args_list,
                          expected)
 
@@ -237,7 +236,7 @@ class EventHandlingTest(unittest.TestCase):
         self.assertEqual(result, bb.event.Registered)
         bb.event.fire_class_handlers(event1, None)
         bb.event.fire_class_handlers(event2, None)
-        expected = [call(event1, None), call(event2, None), call(event1, None)]
+        expected = [call(event1), call(event2), call(event1)]
         self.assertEqual(self._test_process.event_handler1.call_args_list,
                          expected)
 
@@ -251,7 +250,7 @@ class EventHandlingTest(unittest.TestCase):
         self.assertEqual(result, bb.event.Registered)
         bb.event.fire_class_handlers(event1, None)
         bb.event.fire_class_handlers(event2, None)
-        expected = [call(event1,None), call(event2, None), call(event1, None), call(event2, None)]
+        expected = [call(event1), call(event2), call(event1), call(event2)]
         self.assertEqual(self._test_process.event_handler1.call_args_list,
                          expected)
 
@@ -359,10 +358,9 @@ class EventHandlingTest(unittest.TestCase):
 
         event1 = bb.event.ConfigParsed()
         bb.event.fire(event1, None)
-        expected = [call(event1, None)]
+        expected = [call(event1)]
         self.assertEqual(self._test_process.event_handler1.call_args_list,
                          expected)
-        expected = [call(event1)]
         self.assertEqual(self._test_ui1.event.send.call_args_list,
                          expected)
 
@@ -451,15 +449,30 @@ class EventHandlingTest(unittest.TestCase):
             and disable threadlocks tests """
         bb.event.fire(bb.event.OperationStarted(), None)
 
-    def test_event_threadlock(self):
+    def test_enable_threadlock(self):
         """ Test enable_threadlock method """
         self._set_threadlock_test_mockups()
+        bb.event.enable_threadlock()
         self._set_and_run_threadlock_test_workers()
         # Calls to UI handlers should be in order as all the registered
         # handlers for the event coming from the first worker should be
         # called before processing the event from the second worker.
         self.assertEqual(self._threadlock_test_calls,
                          ["w1_ui1", "w1_ui2", "w2_ui1", "w2_ui2"])
+
+
+    def test_disable_threadlock(self):
+        """ Test disable_threadlock method """
+        self._set_threadlock_test_mockups()
+        bb.event.disable_threadlock()
+        self._set_and_run_threadlock_test_workers()
+        # Calls to UI handlers should be intertwined together. Thanks to the
+        # delay in the registered handlers for the event coming from the first
+        # worker, the event coming from the second worker starts being
+        # processed before finishing handling the first worker event.
+        self.assertEqual(self._threadlock_test_calls,
+                         ["w1_ui1", "w2_ui1", "w1_ui2", "w2_ui2"])
+
 
 class EventClassesTest(unittest.TestCase):
     """ Event classes test class """

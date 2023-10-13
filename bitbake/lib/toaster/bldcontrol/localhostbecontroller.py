@@ -7,24 +7,27 @@
 #
 
 import os
+import sys
 import re
 import shutil
 import time
-from bldcontrol.models import BuildEnvironment, BuildRequest, Build
-from orm.models import CustomImageRecipe, Layer, Layer_Version, Project, ToasterSetting
+from django.db import transaction
+from django.db.models import Q
+from bldcontrol.models import BuildEnvironment, BuildRequest, BRLayer, BRVariable, BRTarget, BRBitbake, Build
+from orm.models import CustomImageRecipe, Layer, Layer_Version, Project, ProjectLayer, ToasterSetting
 from orm.models import signal_runbuilds
 import subprocess
 
 from toastermain import settings
 
-from bldcontrol.bbcontroller import BuildEnvironmentController, ShellCmdException, BuildSetupException
+from bldcontrol.bbcontroller import BuildEnvironmentController, ShellCmdException, BuildSetupException, BitbakeController
 
 import logging
 logger = logging.getLogger("toaster")
 
 install_dir = os.environ.get('TOASTER_DIR')
 
-from pprint import pformat
+from pprint import pprint, pformat
 
 class LocalhostBEController(BuildEnvironmentController):
     """ Implementation of the BuildEnvironmentController for the localhost;
@@ -200,7 +203,7 @@ class LocalhostBEController(BuildEnvironmentController):
                 localdirpath = os.path.join(localdirname, dirpath)
                 logger.debug("localhostbecontroller: localdirpath expects '%s'" % localdirpath)
                 if not os.path.exists(localdirpath):
-                    raise BuildSetupException("Cannot find layer git path '%s' in checked out repository '%s:%s'. Exiting." % (localdirpath, giturl, commit))
+                    raise BuildSetupException("Cannot find layer git path '%s' in checked out repository '%s:%s'. Aborting." % (localdirpath, giturl, commit))
 
                 if name != "bitbake":
                     layerlist.append("%03d:%s" % (index,localdirpath.rstrip("/")))
@@ -467,7 +470,7 @@ class LocalhostBEController(BuildEnvironmentController):
             logger.debug("localhostbecontroller: waiting for bblock content to appear")
             time.sleep(1)
         else:
-            raise BuildSetupException("Cannot find bitbake server lock file '%s'. Exiting." % bblock)
+            raise BuildSetupException("Cannot find bitbake server lock file '%s'. Aborting." % bblock)
 
         with open(bblock) as fplock:
             for line in fplock:

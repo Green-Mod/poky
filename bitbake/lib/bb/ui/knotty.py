@@ -12,6 +12,7 @@ from __future__ import division
 
 import os
 import sys
+import xmlrpc.client as xmlrpclib
 import logging
 import progressbar
 import signal
@@ -21,11 +22,10 @@ import fcntl
 import struct
 import copy
 import atexit
-from itertools import groupby
 
 from bb.ui import uihelper
 
-featureSet = [bb.cooker.CookerFeatures.SEND_SANITYEVENTS, bb.cooker.CookerFeatures.BASEDATASTORE_TRACKING]
+featureSet = [bb.cooker.CookerFeatures.SEND_SANITYEVENTS]
 
 logger = logging.getLogger("BitBake")
 interactive = sys.stdout.isatty()
@@ -110,11 +110,12 @@ def pluralise(singular, plural, qty):
 
 
 class InteractConsoleLogFilter(logging.Filter):
-    def __init__(self, tf):
+    def __init__(self, tf, format):
         self.tf = tf
+        self.format = format
 
     def filter(self, record):
-        if record.levelno == bb.msg.BBLogFormatter.NOTE and (record.msg.startswith("Running") or record.msg.startswith("recipe ")):
+        if record.levelno == self.format.NOTE and (record.msg.startswith("Running") or record.msg.startswith("recipe ")):
             return False
         self.tf.clearFooter()
         return True
@@ -145,12 +146,12 @@ class TerminalFilter(object):
                 pass
         if not cr:
             try:
-                cr = (os.environ['LINES'], os.environ['COLUMNS'])
+                cr = (env['LINES'], env['COLUMNS'])
             except:
                 cr = (25, 80)
         return cr
 
-    def __init__(self, main, helper, handlers, quiet):
+    def __init__(self, main, helper, console, errconsole, format, quiet):
         self.main = main
         self.helper = helper
         self.cuu = None
@@ -180,11 +181,7 @@ class TerminalFilter(object):
             termios.tcsetattr(fd, termios.TCSADRAIN, new)
             curses.setupterm()
             if curses.tigetnum("colors") > 2:
-                for h in handlers:
-                    try:
-                        h.formatter.enable_color()
-                    except AttributeError:
-                        pass
+                format.enable_color()
             self.ed = curses.tigetstr("ed")
             if self.ed:
                 self.cuu = curses.tigetstr("cuu")
@@ -200,9 +197,10 @@ class TerminalFilter(object):
             self.interactive = False
             bb.note("Unable to use interactive mode for this terminal, using fallback")
             return
-
-        for h in handlers:
-            h.addFilter(InteractConsoleLogFilter(self))
+        if console:
+            console.addFilter(InteractConsoleLogFilter(self, format))
+        if errconsole:
+            errconsole.addFilter(InteractConsoleLogFilter(self, format))
 
         self.main_progress = None
 
@@ -228,9 +226,7 @@ class TerminalFilter(object):
 
     def keepAlive(self, t):
         if not self.cuu:
-            print("Bitbake still alive (no events for %ds). Active tasks:" % t)
-            for t in self.helper.running_tasks:
-                print(t)
+            print("Bitbake still alive (%ds)" % t)
             sys.stdout.flush()
 
     def updateFooter(self):
@@ -252,68 +248,58 @@ class TerminalFilter(object):
             return
         tasks = []
         for t in runningpids:
-            start_time = activetasks[t].get("starttime", None)
-            if start_time:
-                msg = "%s - %s (pid %s)" % (activetasks[t]["title"], self.elapsed(currenttime - start_time), activetasks[t]["pid"])
-            else:
-                msg = "%s (pid %s)" % (activetasks[t]["title"], activetasks[t]["pid"])
             progress = activetasks[t].get("progress", None)
             if progress is not None:
                 pbar = activetasks[t].get("progressbar", None)
                 rate = activetasks[t].get("rate", None)
+                start_time = activetasks[t].get("starttime", None)
                 if not pbar or pbar.bouncing != (progress < 0):
                     if progress < 0:
-                        pbar = BBProgress("0: %s" % msg, 100, widgets=[' ', progressbar.BouncingSlider(), ''], extrapos=3, resize_handler=self.sigwinch_handle)
+                        pbar = BBProgress("0: %s (pid %s)" % (activetasks[t]["title"], activetasks[t]["pid"]), 100, widgets=[' ', progressbar.BouncingSlider(), ''], extrapos=3, resize_handler=self.sigwinch_handle)
                         pbar.bouncing = True
                     else:
-                        pbar = BBProgress("0: %s" % msg, 100, widgets=[' ', progressbar.Percentage(), ' ', progressbar.Bar(), ''], extrapos=5, resize_handler=self.sigwinch_handle)
+                        pbar = BBProgress("0: %s (pid %s)" % (activetasks[t]["title"], activetasks[t]["pid"]), 100, widgets=[' ', progressbar.Percentage(), ' ', progressbar.Bar(), ''], extrapos=5, resize_handler=self.sigwinch_handle)
                         pbar.bouncing = False
                     activetasks[t]["progressbar"] = pbar
-                tasks.append((pbar, msg, progress, rate, start_time))
+                tasks.append((pbar, progress, rate, start_time))
             else:
-                tasks.append(msg)
+                start_time = activetasks[t].get("starttime", None)
+                if start_time:
+                    tasks.append("%s - %s (pid %s)" % (activetasks[t]["title"], self.elapsed(currenttime - start_time), activetasks[t]["pid"]))
+                else:
+                    tasks.append("%s (pid %s)" % (activetasks[t]["title"], activetasks[t]["pid"]))
 
         if self.main.shutdown:
-            content = pluralise("Waiting for %s running task to finish",
-                                "Waiting for %s running tasks to finish", len(activetasks))
-            if not self.quiet:
-                content += ':'
+            content = "Waiting for %s running tasks to finish:" % len(activetasks)
             print(content)
         else:
-            scene_tasks = "%s of %s" % (self.helper.setscene_current, self.helper.setscene_total)
-            cur_tasks = "%s of %s" % (self.helper.tasknumber_current, self.helper.tasknumber_total)
-
-            content = ''
-            if not self.quiet:
-                msg = "Setscene tasks: %s" % scene_tasks
-                content += msg + "\n"
-                print(msg)
-
             if self.quiet:
-                msg = "Running tasks (%s, %s)" % (scene_tasks, cur_tasks)
+                content = "Running tasks (%s of %s)" % (self.helper.tasknumber_current, self.helper.tasknumber_total)
             elif not len(activetasks):
-                msg = "No currently running tasks (%s)" % cur_tasks
+                content = "No currently running tasks (%s of %s)" % (self.helper.tasknumber_current, self.helper.tasknumber_total)
             else:
-                msg = "Currently %2s running tasks (%s)" % (len(activetasks), cur_tasks)
+                content = "Currently %2s running tasks (%s of %s)" % (len(activetasks), self.helper.tasknumber_current, self.helper.tasknumber_total)
             maxtask = self.helper.tasknumber_total
             if not self.main_progress or self.main_progress.maxval != maxtask:
                 widgets = [' ', progressbar.Percentage(), ' ', progressbar.Bar()]
                 self.main_progress = BBProgress("Running tasks", maxtask, widgets=widgets, resize_handler=self.sigwinch_handle)
                 self.main_progress.start(False)
-            self.main_progress.setmessage(msg)
-            progress = max(0, self.helper.tasknumber_current - 1)
-            content += self.main_progress.update(progress)
+            self.main_progress.setmessage(content)
+            progress = self.helper.tasknumber_current - 1
+            if progress < 0:
+                progress = 0
+            content = self.main_progress.update(progress)
             print('')
-        lines = self.getlines(content)
-        if not self.quiet:
-            for tasknum, task in enumerate(tasks[:(self.rows - 1 - lines)]):
+        lines = 1 + int(len(content) / (self.columns + 1))
+        if self.quiet == 0:
+            for tasknum, task in enumerate(tasks[:(self.rows - 2)]):
                 if isinstance(task, tuple):
-                    pbar, msg, progress, rate, start_time = task
+                    pbar, progress, rate, start_time = task
                     if not pbar.start_time:
                         pbar.start(False)
                         if start_time:
                             pbar.start_time = start_time
-                    pbar.setmessage('%s: %s' % (tasknum, msg))
+                    pbar.setmessage('%s:%s' % (tasknum, pbar.msg.split(':', 1)[1]))
                     pbar.setextra(rate)
                     if progress > -1:
                         content = pbar.update(progress)
@@ -323,16 +309,10 @@ class TerminalFilter(object):
                 else:
                     content = "%s: %s" % (tasknum, task)
                     print(content)
-                lines = lines + self.getlines(content)
+                lines = lines + 1 + int(len(content) / (self.columns + 1))
         self.footer_present = lines
         self.lastpids = runningpids[:]
         self.lastcount = self.helper.tasknumber_current
-
-    def getlines(self, content):
-        lines = 0
-        for line in content.split("\n"):
-            lines = lines + 1 + int(len(line) / (self.columns + 1))
-        return lines
 
     def finish(self):
         if self.stdinbackup:
@@ -383,11 +363,7 @@ def _log_settings_from_server(server, observe_only):
     if error:
         logger.error("Unable to get the value of BB_CONSOLELOG variable: %s" % error)
         raise BaseException(error)
-    logconfigfile, error = server.runCommand([cmd, "BB_LOGCONFIG"])
-    if error:
-        logger.error("Unable to get the value of BB_LOGCONFIG variable: %s" % error)
-        raise BaseException(error)
-    return includelogs, loglines, consolelogfile, logconfigfile
+    return includelogs, loglines, consolelogfile
 
 _evt_list = [ "bb.runqueue.runQueueExitWait", "bb.event.LogExecTTY", "logging.LogRecord",
               "bb.build.TaskFailed", "bb.build.TaskBase", "bb.event.ParseStarted",
@@ -399,173 +375,12 @@ _evt_list = [ "bb.runqueue.runQueueExitWait", "bb.event.LogExecTTY", "logging.Lo
               "bb.event.BuildBase", "bb.build.TaskStarted", "bb.build.TaskSucceeded", "bb.build.TaskFailedSilent",
               "bb.build.TaskProgress", "bb.event.ProcessStarted", "bb.event.ProcessProgress", "bb.event.ProcessFinished"]
 
-def drain_events_errorhandling(eventHandler):
-    # We don't have logging setup, we do need to show any events we see before exiting
-    event = True
-    logger = bb.msg.logger_create('bitbake', sys.stdout)
-    while event:
-        event = eventHandler.waitEvent(0)
-        if isinstance(event, logging.LogRecord):
-            logger.handle(event)
-
 def main(server, eventHandler, params, tf = TerminalFilter):
 
-    try:
-        if not params.observe_only:
-            params.updateToServer(server, os.environ.copy())
+    if not params.observe_only:
+        params.updateToServer(server, os.environ.copy())
 
-        includelogs, loglines, consolelogfile, logconfigfile = _log_settings_from_server(server, params.observe_only)
-
-        loglevel, _ = bb.msg.constructLogOptions()
-    except bb.BBHandledException:
-        drain_events_errorhandling(eventHandler)
-        return 1
-
-    if params.options.quiet == 0:
-        console_loglevel = loglevel
-    elif params.options.quiet > 2:
-        console_loglevel = bb.msg.BBLogFormatter.ERROR
-    else:
-        console_loglevel = bb.msg.BBLogFormatter.WARNING
-
-    logconfig = {
-        "version": 1,
-        "handlers": {
-            "BitBake.console": {
-                "class": "logging.StreamHandler",
-                "formatter": "BitBake.consoleFormatter",
-                "level": console_loglevel,
-                "stream": "ext://sys.stdout",
-                "filters": ["BitBake.stdoutFilter"],
-                ".": {
-                    "is_console": True,
-                },
-            },
-            "BitBake.errconsole": {
-                "class": "logging.StreamHandler",
-                "formatter": "BitBake.consoleFormatter",
-                "level": loglevel,
-                "stream": "ext://sys.stderr",
-                "filters": ["BitBake.stderrFilter"],
-                ".": {
-                    "is_console": True,
-                },
-            },
-            # This handler can be used if specific loggers should print on
-            # the console at a lower severity than the default. It will
-            # display any messages sent to it that are lower than then
-            # BitBake.console logging level (so as to prevent duplication of
-            # messages). Nothing is attached to this handler by default
-            "BitBake.verbconsole": {
-                "class": "logging.StreamHandler",
-                "formatter": "BitBake.consoleFormatter",
-                "level": 1,
-                "stream": "ext://sys.stdout",
-                "filters": ["BitBake.verbconsoleFilter"],
-                ".": {
-                    "is_console": True,
-                },
-            },
-        },
-        "formatters": {
-            # This format instance will get color output enabled by the
-            # terminal
-            "BitBake.consoleFormatter" : {
-                "()": "bb.msg.BBLogFormatter",
-                "format": "%(levelname)s: %(message)s"
-            },
-            # The file log requires a separate instance so that it doesn't get
-            # color enabled
-            "BitBake.logfileFormatter": {
-                "()": "bb.msg.BBLogFormatter",
-                "format": "%(levelname)s: %(message)s"
-            }
-        },
-        "filters": {
-            "BitBake.stdoutFilter": {
-                "()": "bb.msg.LogFilterLTLevel",
-                "level": "ERROR"
-            },
-            "BitBake.stderrFilter": {
-                "()": "bb.msg.LogFilterGEQLevel",
-                "level": "ERROR"
-            },
-            "BitBake.verbconsoleFilter": {
-                "()": "bb.msg.LogFilterLTLevel",
-                "level": console_loglevel
-            },
-        },
-        "loggers": {
-            "BitBake": {
-                "level": loglevel,
-                "handlers": ["BitBake.console", "BitBake.errconsole"],
-            }
-        },
-        "disable_existing_loggers": False
-    }
-
-    # Enable the console log file if enabled
-    if consolelogfile and not params.options.show_environment and not params.options.show_versions:
-        logconfig = bb.msg.mergeLoggingConfig(logconfig, {
-                "version": 1,
-                "handlers" : {
-                    "BitBake.consolelog": {
-                        "class": "logging.FileHandler",
-                        "formatter": "BitBake.logfileFormatter",
-                        "level": loglevel,
-                        "filename": consolelogfile,
-                    },
-                    # Just like verbconsole, anything sent here will go to the
-                    # log file, unless it would go to BitBake.consolelog
-                    "BitBake.verbconsolelog" : {
-                        "class": "logging.FileHandler",
-                        "formatter": "BitBake.logfileFormatter",
-                        "level": 1,
-                        "filename": consolelogfile,
-                        "filters": ["BitBake.verbconsolelogFilter"],
-                    },
-                },
-                "filters": {
-                    "BitBake.verbconsolelogFilter": {
-                        "()": "bb.msg.LogFilterLTLevel",
-                        "level": loglevel,
-                    },
-                },
-                "loggers": {
-                    "BitBake": {
-                        "handlers": ["BitBake.consolelog"],
-                    },
-
-                    # Other interesting things that we want to keep an eye on
-                    # in the log files in case someone has an issue, but not
-                    # necessarily show to the user on the console
-                    "BitBake.SigGen.HashEquiv": {
-                        "level": "VERBOSE",
-                        "handlers": ["BitBake.verbconsolelog"],
-                    },
-                    "BitBake.RunQueue.HashEquiv": {
-                        "level": "VERBOSE",
-                        "handlers": ["BitBake.verbconsolelog"],
-                    }
-                }
-            })
-
-        bb.utils.mkdirhier(os.path.dirname(consolelogfile))
-        loglink = os.path.join(os.path.dirname(consolelogfile), 'console-latest.log')
-        bb.utils.remove(loglink)
-        try:
-           os.symlink(os.path.basename(consolelogfile), loglink)
-        except OSError:
-           pass
-
-    # Add the logging domains specified by the user on the command line
-    for (domainarg, iterator) in groupby(params.debug_domains):
-        dlevel = len(tuple(iterator))
-        l = logconfig["loggers"].setdefault("BitBake.%s" % domainarg, {})
-        l["level"] = logging.DEBUG - dlevel + 1
-        l.setdefault("handlers", []).extend(["BitBake.verbconsole"])
-
-    conf = bb.msg.setLoggingConfig(logconfig, logconfigfile)
+    includelogs, loglines, consolelogfile = _log_settings_from_server(server, params.observe_only)
 
     if sys.stdin.isatty() and sys.stdout.isatty():
         log_exec_tty = True
@@ -574,9 +389,23 @@ def main(server, eventHandler, params, tf = TerminalFilter):
 
     helper = uihelper.BBUIHelper()
 
-    # Look for the specially designated handlers which need to be passed to the
-    # terminal handler
-    console_handlers = [h for h in conf.config['handlers'].values() if getattr(h, 'is_console', False)]
+    console = logging.StreamHandler(sys.stdout)
+    errconsole = logging.StreamHandler(sys.stderr)
+    format_str = "%(levelname)s: %(message)s"
+    format = bb.msg.BBLogFormatter(format_str)
+    if params.options.quiet == 0:
+        forcelevel = None
+    elif params.options.quiet > 2:
+        forcelevel = bb.msg.BBLogFormatter.ERROR
+    else:
+        forcelevel = bb.msg.BBLogFormatter.WARNING
+    bb.msg.addDefaultlogFilter(console, bb.msg.BBLogFilterStdOut, forcelevel)
+    bb.msg.addDefaultlogFilter(errconsole, bb.msg.BBLogFilterStdErr)
+    console.setFormatter(format)
+    errconsole.setFormatter(format)
+    if not bb.msg.has_console_handler(logger):
+        logger.addHandler(console)
+        logger.addHandler(errconsole)
 
     bb.utils.set_process_name("KnottyUI")
 
@@ -584,13 +413,23 @@ def main(server, eventHandler, params, tf = TerminalFilter):
         server.terminateServer()
         return
 
+    consolelog = None
+    if consolelogfile and not params.options.show_environment and not params.options.show_versions:
+        bb.utils.mkdirhier(os.path.dirname(consolelogfile))
+        conlogformat = bb.msg.BBLogFormatter(format_str)
+        consolelog = logging.FileHandler(consolelogfile)
+        bb.msg.addDefaultlogFilter(consolelog)
+        consolelog.setFormatter(conlogformat)
+        logger.addHandler(consolelog)
+        loglink = os.path.join(os.path.dirname(consolelogfile), 'console-latest.log')
+        bb.utils.remove(loglink)
+        try:
+           os.symlink(os.path.basename(consolelogfile), loglink)
+        except OSError:
+           pass
+
     llevel, debug_domains = bb.msg.constructLogOptions()
     server.runCommand(["setEventMask", server.getEventHandle(), llevel, debug_domains, _evt_list])
-
-    # The logging_tree module is *extremely* helpful in debugging logging
-    # domains. Uncomment here to dump the logging tree when bitbake starts
-    #import logging_tree
-    #logging_tree.printout()
 
     universe = False
     if not params.observe_only:
@@ -609,7 +448,7 @@ def main(server, eventHandler, params, tf = TerminalFilter):
         if error:
             logger.error("Command '%s' failed: %s" % (cmdline, error))
             return 1
-        elif not ret:
+        elif ret != True:
             logger.error("Command '%s' failed: returned %s" % (cmdline, ret))
             return 1
 
@@ -623,40 +462,26 @@ def main(server, eventHandler, params, tf = TerminalFilter):
     warnings = 0
     taskfailures = []
 
-    printintervaldelta = 10 * 60 # 10 minutes
-    printinterval = printintervaldelta
-    pinginterval = 1 * 60 # 1 minute
-    lastevent = lastprint = time.time()
+    printinterval = 5000
+    lastprint = time.time()
 
-    termfilter = tf(main, helper, console_handlers, params.options.quiet)
+    termfilter = tf(main, helper, console, errconsole, format, params.options.quiet)
     atexit.register(termfilter.finish)
 
-    # shutdown levels
-    # 0 - normal operation
-    # 1 - no new task execution, let current running tasks finish
-    # 2 - interrupting currently executing tasks
-    # 3 - we're done, exit
-    while main.shutdown < 3:
+    while True:
         try:
             if (lastprint + printinterval) <= time.time():
                 termfilter.keepAlive(printinterval)
-                printinterval += printintervaldelta
+                printinterval += 5000
             event = eventHandler.waitEvent(0)
             if event is None:
-                if (lastevent + pinginterval) <= time.time():
-                    ret, error = server.runCommand(["ping"])
-                    if error or not ret:
-                        termfilter.clearFooter()
-                        print("No reply after pinging server (%s, %s), exiting." % (str(error), str(ret)))
-                        return_value = 3
-                        main.shutdown = 3
-                    lastevent = time.time()
+                if main.shutdown > 1:
+                    break
                 if not parseprogress:
                     termfilter.updateFooter()
                 event = eventHandler.waitEvent(0.25)
                 if event is None:
                     continue
-            lastevent = time.time()
             helper.eventHandler(event)
             if isinstance(event, bb.runqueue.runQueueExitWait):
                 if not main.shutdown:
@@ -678,27 +503,27 @@ def main(server, eventHandler, params, tf = TerminalFilter):
 
             if isinstance(event, logging.LogRecord):
                 lastprint = time.time()
-                printinterval = printintervaldelta
-                if event.levelno >= bb.msg.BBLogFormatter.ERRORONCE:
+                printinterval = 5000
+                if event.levelno >= format.ERROR:
                     errors = errors + 1
                     return_value = 1
-                elif event.levelno == bb.msg.BBLogFormatter.WARNING:
+                elif event.levelno == format.WARNING:
                     warnings = warnings + 1
 
                 if event.taskpid != 0:
                     # For "normal" logging conditions, don't show note logs from tasks
                     # but do show them if the user has changed the default log level to
                     # include verbose/debug messages
-                    if event.levelno <= bb.msg.BBLogFormatter.NOTE and (event.levelno < llevel or (event.levelno == bb.msg.BBLogFormatter.NOTE and llevel != bb.msg.BBLogFormatter.VERBOSE)):
+                    if event.levelno <= format.NOTE and (event.levelno < llevel or (event.levelno == format.NOTE and llevel != format.VERBOSE)):
                         continue
 
                     # Prefix task messages with recipe/task
-                    if event.taskpid in helper.pidmap and event.levelno not in [bb.msg.BBLogFormatter.PLAIN, bb.msg.BBLogFormatter.WARNONCE, bb.msg.BBLogFormatter.ERRORONCE]:
+                    if event.taskpid in helper.pidmap and event.levelno != format.PLAIN:
                         taskinfo = helper.running_tasks[helper.pidmap[event.taskpid]]
                         event.msg = taskinfo['title'] + ': ' + event.msg
-                if hasattr(event, 'fn') and event.levelno not in [bb.msg.BBLogFormatter.WARNONCE, bb.msg.BBLogFormatter.ERRORONCE]:
+                if hasattr(event, 'fn'):
                     event.msg = event.fn + ': ' + event.msg
-                logging.getLogger(event.name).handle(event)
+                logger.handle(event)
                 continue
 
             if isinstance(event, bb.build.TaskFailedSilent):
@@ -732,7 +557,7 @@ def main(server, eventHandler, params, tf = TerminalFilter):
                 if not parseprogress:
                     continue
                 parseprogress.finish()
-                parseprogress = None
+                pasreprogress = None
                 if params.options.quiet == 0:
                     print(("Parsing of %d .bb files complete (%d cached, %d parsed). %d targets, %d skipped, %d masked, %d errors."
                         % ( event.total, event.cached, event.parsed, event.virtuals, event.skipped, event.masked, event.errors)))
@@ -761,15 +586,14 @@ def main(server, eventHandler, params, tf = TerminalFilter):
                 if event.error:
                     errors = errors + 1
                     logger.error(str(event))
-                main.shutdown = 3
+                main.shutdown = 2
                 continue
             if isinstance(event, bb.command.CommandExit):
                 if not return_value:
                     return_value = event.exitcode
-                main.shutdown = 3
                 continue
             if isinstance(event, (bb.command.CommandCompleted, bb.cooker.CookerExit)):
-                main.shutdown = 3
+                main.shutdown = 2
                 continue
             if isinstance(event, bb.event.MultipleProviders):
                 logger.info(str(event))
@@ -785,7 +609,7 @@ def main(server, eventHandler, params, tf = TerminalFilter):
                 continue
 
             if isinstance(event, bb.runqueue.sceneQueueTaskStarted):
-                logger.info("Running setscene task %d of %d (%s)" % (event.stats.setscene_covered + event.stats.setscene_active + event.stats.setscene_notcovered + 1, event.stats.setscene_total, event.taskstring))
+                logger.info("Running setscene task %d of %d (%s)" % (event.stats.completed + event.stats.active + event.stats.failed + 1, event.stats.total, event.taskstring))
                 continue
 
             if isinstance(event, bb.runqueue.runQueueTaskStarted):
@@ -890,6 +714,7 @@ def main(server, eventHandler, params, tf = TerminalFilter):
                     state_force_shutdown()
 
             main.shutdown = main.shutdown + 1
+            pass
         except Exception as e:
             import traceback
             sys.stderr.write(traceback.format_exc())
@@ -906,11 +731,11 @@ def main(server, eventHandler, params, tf = TerminalFilter):
             for failure in taskfailures:
                 summary += "\n  %s" % failure
         if warnings:
-            summary += pluralise("\nSummary: There was %s WARNING message.",
-                                 "\nSummary: There were %s WARNING messages.", warnings)
+            summary += pluralise("\nSummary: There was %s WARNING message shown.",
+                                 "\nSummary: There were %s WARNING messages shown.", warnings)
         if return_value and errors:
-            summary += pluralise("\nSummary: There was %s ERROR message, returning a non-zero exit code.",
-                                 "\nSummary: There were %s ERROR messages, returning a non-zero exit code.", errors)
+            summary += pluralise("\nSummary: There was %s ERROR message shown, returning a non-zero exit code.",
+                                 "\nSummary: There were %s ERROR messages shown, returning a non-zero exit code.", errors)
         if summary and params.options.quiet == 0:
             print(summary)
 
@@ -923,6 +748,8 @@ def main(server, eventHandler, params, tf = TerminalFilter):
         if e.errno == errno.EPIPE:
             pass
 
-    logging.shutdown()
+    if consolelog:
+        logger.removeHandler(consolelog)
+        consolelog.close()
 
     return return_value

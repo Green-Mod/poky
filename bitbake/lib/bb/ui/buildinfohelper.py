@@ -45,7 +45,7 @@ from pprint import pformat
 import logging
 from datetime import datetime, timedelta
 
-from django.db import transaction
+from django.db import transaction, connection
 
 
 # pylint: disable=invalid-name
@@ -148,14 +148,14 @@ class ORMWrapper(object):
         buildrequest = None
         if brbe is not None:
             # Toaster-triggered build
-            logger.debug("buildinfohelper: brbe is %s" % brbe)
+            logger.debug(1, "buildinfohelper: brbe is %s" % brbe)
             br, _ = brbe.split(":")
             buildrequest = BuildRequest.objects.get(pk=br)
             prj = buildrequest.project
         else:
             # CLI build
             prj = Project.objects.get_or_create_default_project()
-            logger.debug("buildinfohelper: project is not specified, defaulting to %s" % prj)
+            logger.debug(1, "buildinfohelper: project is not specified, defaulting to %s" % prj)
 
         if buildrequest is not None:
             # reuse existing Build object
@@ -171,7 +171,7 @@ class ORMWrapper(object):
                 completed_on=now,
                 build_name='')
 
-        logger.debug("buildinfohelper: build is created %s" % build)
+        logger.debug(1, "buildinfohelper: build is created %s" % build)
 
         if buildrequest is not None:
             buildrequest.build = build
@@ -227,12 +227,6 @@ class ORMWrapper(object):
         build.completed_on = timezone.now()
         build.outcome = outcome
         build.save()
-
-        # We force a sync point here to force the outcome status commit,
-        # which resolves a race condition with the build completion takedown
-        transaction.set_autocommit(True)
-        transaction.set_autocommit(False)
-
         signal_runbuilds()
 
     def update_target_set_license_manifest(self, target, license_manifest_path):
@@ -489,14 +483,14 @@ class ORMWrapper(object):
 
             # we already created the root directory, so ignore any
             # entry for it
-            if not path:
+            if len(path) == 0:
                 continue
 
             parent_path = "/".join(path.split("/")[:len(path.split("/")) - 1])
-            if not parent_path:
+            if len(parent_path) == 0:
                 parent_path = "/"
             parent_obj = self._cached_get(Target_File, target = target_obj, path = parent_path, inodetype = Target_File.ITYPE_DIRECTORY)
-            Target_File.objects.create(
+            tf_obj = Target_File.objects.create(
                         target = target_obj,
                         path = path,
                         size = size,
@@ -561,7 +555,7 @@ class ORMWrapper(object):
 
             parent_obj = Target_File.objects.get(target = target_obj, path = parent_path, inodetype = Target_File.ITYPE_DIRECTORY)
 
-            Target_File.objects.create(
+            tf_obj = Target_File.objects.create(
                         target = target_obj,
                         path = path,
                         size = size,
@@ -577,7 +571,7 @@ class ORMWrapper(object):
         assert isinstance(build_obj, Build)
         assert isinstance(target_obj, Target)
 
-        errormsg = []
+        errormsg = ""
         for p in packagedict:
             # Search name swtiches round the installed name vs package name
             # by default installed name == package name
@@ -639,10 +633,10 @@ class ORMWrapper(object):
                         packagefile_objects.append(Package_File( package = packagedict[p]['object'],
                             path = targetpath,
                             size = targetfilesize))
-                    if packagefile_objects:
+                    if len(packagefile_objects):
                         Package_File.objects.bulk_create(packagefile_objects)
                 except KeyError as e:
-                    errormsg.append("  stpi: Key error, package %s key %s \n" % (p, e))
+                    errormsg += "  stpi: Key error, package %s key %s \n" % ( p, e )
 
             # save disk installed size
             packagedict[p]['object'].installed_size = packagedict[p]['size']
@@ -679,13 +673,13 @@ class ORMWrapper(object):
                     logger.warning("Could not add dependency to the package %s "
                                    "because %s is an unknown package", p, px)
 
-        if packagedeps_objs:
+        if len(packagedeps_objs) > 0:
             Package_Dependency.objects.bulk_create(packagedeps_objs)
         else:
             logger.info("No package dependencies created")
 
-        if errormsg:
-            logger.warning("buildinfohelper: target_package_info could not identify recipes: \n%s", "".join(errormsg))
+        if len(errormsg) > 0:
+            logger.warning("buildinfohelper: target_package_info could not identify recipes: \n%s", errormsg)
 
     def save_target_image_file_information(self, target_obj, file_name, file_size):
         Target_Image_File.objects.create(target=target_obj,
@@ -773,7 +767,7 @@ class ORMWrapper(object):
             packagefile_objects.append(Package_File( package = bp_object,
                                         path = path,
                                         size = package_info['FILES_INFO'][path] ))
-        if packagefile_objects:
+        if len(packagefile_objects):
             Package_File.objects.bulk_create(packagefile_objects)
 
         def _po_byname(p):
@@ -815,7 +809,7 @@ class ORMWrapper(object):
                 packagedeps_objs.append(Package_Dependency(  package = bp_object,
                     depends_on = _po_byname(p), dep_type = Package_Dependency.TYPE_RCONFLICTS))
 
-        if packagedeps_objs:
+        if len(packagedeps_objs) > 0:
             Package_Dependency.objects.bulk_create(packagedeps_objs)
 
         return bp_object
@@ -832,7 +826,7 @@ class ORMWrapper(object):
                     desc = vardump[root_var]['doc']
             if desc is None:
                 desc = ''
-            if desc:
+            if len(desc):
                 HelpText.objects.get_or_create(build=build_obj,
                                                area=HelpText.VARIABLE,
                                                key=k, text=desc)
@@ -852,7 +846,7 @@ class ORMWrapper(object):
                                 file_name = vh['file'],
                                 line_number = vh['line'],
                                 operation = vh['op']))
-                if varhist_objects:
+                if len(varhist_objects):
                     VariableHistory.objects.bulk_create(varhist_objects)
 
 
@@ -899,6 +893,9 @@ class BuildInfoHelper(object):
         self.task_order = 0
         self.autocommit_step = 1
         self.server = server
+        # we use manual transactions if the database doesn't autocommit on us
+        if not connection.features.autocommits_when_autocommit_is_off:
+            transaction.set_autocommit(False)
         self.orm_wrapper = ORMWrapper()
         self.has_build_history = has_build_history
         self.tmp_dir = self.server.runCommand(["getVariable", "TMPDIR"])[0]
@@ -909,7 +906,7 @@ class BuildInfoHelper(object):
 
         self.project = None
 
-        logger.debug("buildinfohelper: Build info helper inited %s" % vars(self))
+        logger.debug(1, "buildinfohelper: Build info helper inited %s" % vars(self))
 
 
     ###################
@@ -938,7 +935,7 @@ class BuildInfoHelper(object):
 
             # only reset the build name if the one on the server is actually
             # a valid value for the build_name field
-            if build_name is not None:
+            if build_name != None:
                 build_info['build_name'] = build_name
                 changed = True
 
@@ -1062,6 +1059,27 @@ class BuildInfoHelper(object):
 
         return recipe_info
 
+    def _get_path_information(self, task_object):
+        self._ensure_build()
+
+        assert isinstance(task_object, Task)
+        build_stats_format = "{tmpdir}/buildstats/{buildname}/{package}/"
+        build_stats_path = []
+
+        for t in self.internal_state['targets']:
+            buildname = self.internal_state['build'].build_name
+            pe, pv = task_object.recipe.version.split(":",1)
+            if len(pe) > 0:
+                package = task_object.recipe.name + "-" + pe + "_" + pv
+            else:
+                package = task_object.recipe.name + "-" + pv
+
+            build_stats_path.append(build_stats_format.format(tmpdir=self.tmp_dir,
+                                                     buildname=buildname,
+                                                     package=package))
+
+        return build_stats_path
+
 
     ################################
     ## external available methods to store information
@@ -1176,7 +1194,7 @@ class BuildInfoHelper(object):
         evdata = BuildInfoHelper._get_data_from_event(event)
 
         for t in self.internal_state['targets']:
-            if t.is_image:
+            if t.is_image == True:
                 output_files = list(evdata.keys())
                 for output in output_files:
                     if t.target in output and 'rootfs' in output and not output.endswith(".manifest"):
@@ -1218,7 +1236,7 @@ class BuildInfoHelper(object):
                 task_information['outcome'] = Task.OUTCOME_PREBUILT
         else:
             task_information['task_executed'] = True
-            if 'noexec' in vars(event) and event.noexec:
+            if 'noexec' in vars(event) and event.noexec == True:
                 task_information['task_executed'] = False
                 task_information['outcome'] = Task.OUTCOME_EMPTY
                 task_information['script_type'] = Task.CODING_NA
@@ -1295,11 +1313,12 @@ class BuildInfoHelper(object):
                 task_information['outcome'] = Task.OUTCOME_FAILED
                 del self.internal_state['taskdata'][identifier]
 
-        # we force a sync point here, to get the progress bar to show
-        if self.autocommit_step % 3 == 0:
-            transaction.set_autocommit(True)
-            transaction.set_autocommit(False)
-        self.autocommit_step += 1
+        if not connection.features.autocommits_when_autocommit_is_off:
+            # we force a sync point here, to get the progress bar to show
+            if self.autocommit_step % 3 == 0:
+                transaction.set_autocommit(True)
+                transaction.set_autocommit(False)
+            self.autocommit_step += 1
 
         self.orm_wrapper.get_update_task_object(task_information, True) # must exist
 
@@ -1385,7 +1404,7 @@ class BuildInfoHelper(object):
         assert 'pn' in event._depgraph
         assert 'tdepends' in event._depgraph
 
-        errormsg = []
+        errormsg = ""
 
         # save layer version priorities
         if 'layer-priorities' in event._depgraph.keys():
@@ -1477,7 +1496,7 @@ class BuildInfoHelper(object):
                 elif dep in self.internal_state['recipes']:
                     dependency = self.internal_state['recipes'][dep]
                 else:
-                    errormsg.append("  stpd: KeyError saving recipe dependency for %s, %s \n" % (recipe, dep))
+                    errormsg += "  stpd: KeyError saving recipe dependency for %s, %s \n" % (recipe, dep)
                     continue
                 recipe_dep = Recipe_Dependency(recipe=target,
                                                depends_on=dependency,
@@ -1518,8 +1537,8 @@ class BuildInfoHelper(object):
                 taskdeps_objects.append(Task_Dependency( task = target, depends_on = dep ))
         Task_Dependency.objects.bulk_create(taskdeps_objects)
 
-        if errormsg:
-            logger.warning("buildinfohelper: dependency info not identify recipes: \n%s", "".join(errormsg))
+        if len(errormsg) > 0:
+            logger.warning("buildinfohelper: dependency info not identify recipes: \n%s", errormsg)
 
 
     def store_build_package_information(self, event):
@@ -1599,9 +1618,9 @@ class BuildInfoHelper(object):
 
         if 'backlog' in self.internal_state:
             # if we have a backlog of events, do our best to save them here
-            if self.internal_state['backlog']:
+            if len(self.internal_state['backlog']):
                 tempevent = self.internal_state['backlog'].pop()
-                logger.debug("buildinfohelper: Saving stored event %s "
+                logger.debug(1, "buildinfohelper: Saving stored event %s "
                              % tempevent)
                 self.store_log_event(tempevent,cli_backlog)
             else:
@@ -1746,6 +1765,7 @@ class BuildInfoHelper(object):
 
         buildname = self.server.runCommand(['getVariable', 'BUILDNAME'])[0]
         machine = self.server.runCommand(['getVariable', 'MACHINE'])[0]
+        image_name = self.server.runCommand(['getVariable', 'IMAGE_NAME'])[0]
 
         # location of the manifest files for this build;
         # note that this file is only produced if an image is produced
@@ -1756,7 +1776,7 @@ class BuildInfoHelper(object):
         image_file_extensions_unique = {}
         image_fstypes = self.server.runCommand(
             ['getVariable', 'IMAGE_FSTYPES'])[0]
-        if image_fstypes is not None:
+        if image_fstypes != None:
             image_types_str = image_fstypes.strip()
             image_file_extensions = re.sub(r' {2,}', ' ', image_types_str)
             image_file_extensions_unique = set(image_file_extensions.split(' '))
@@ -1765,18 +1785,6 @@ class BuildInfoHelper(object):
 
         # filter out anything which isn't an image target
         image_targets = [target for target in targets if target.is_image]
-
-        if len(image_targets) > 0:
-            #if there are image targets retrieve image_name
-            image_name = self.server.runCommand(['getVariable', 'IMAGE_NAME'])[0]
-            if not image_name:
-                #When build target is an image and image_name is not found as an environment variable
-                logger.info("IMAGE_NAME not found, extracting from bitbake command")
-                cmd = self.server.runCommand(['getVariable','BB_CMDLINE'])[0]
-                #filter out tokens that are command line options
-                cmd = [token for token in cmd if not token.startswith('-')]
-                image_name = cmd[1].split(':', 1)[0] # remove everything after : in image name
-                logger.info("IMAGE_NAME found as : %s " % image_name)
 
         for image_target in image_targets:
             # this is set to True if we find at least one file relating to
@@ -1982,6 +1990,8 @@ class BuildInfoHelper(object):
             # Do not skip command line build events
             self.store_log_event(tempevent,False)
 
+        if not connection.features.autocommits_when_autocommit_is_off:
+            transaction.set_autocommit(True)
 
         # unset the brbe; this is to prevent subsequent command-line builds
         # being incorrectly attached to the previous Toaster-triggered build;
