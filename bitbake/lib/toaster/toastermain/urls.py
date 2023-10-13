@@ -6,7 +6,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
 
-from django.conf.urls import include, url
+from django.urls import re_path as url, include
 from django.views.generic import RedirectView, TemplateView
 from django.views.decorators.cache import never_cache
 import bldcollector.views
@@ -27,6 +27,8 @@ urlpatterns = [
     # Uncomment the admin/doc line below to enable admin documentation:
     # url(r'^admin/doc/', include('django.contrib.admindocs.urls')),
 
+
+    url(r'^logs/', include('log_viewer.urls')),
 
     # This is here to maintain backward compatibility and will be deprecated
     # in the future.
@@ -51,7 +53,7 @@ if toastermain.settings.DEBUG_PANEL_ENABLED:
 
 urlpatterns = [
     # Uncomment the next line to enable the admin:
-    url(r'^admin/', include(admin.site.urls)),
+    url(r'^admin/', admin.site.urls),
 ] + urlpatterns
 
 # Automatically discover urls.py in various apps, beside our own
@@ -69,7 +71,7 @@ for t in os.walk(os.path.dirname(currentdir)):
         # make sure we don't have this module name in
         conflict = False
         for p in urlpatterns:
-            if p.regex.pattern == '^' + modulename + '/':
+            if p.pattern.regex.pattern == '^' + modulename + '/':
                 conflict = True
         if not conflict:
             urlpatterns.insert(0, url(r'^' + modulename + '/', include ( modulename + '.urls')))

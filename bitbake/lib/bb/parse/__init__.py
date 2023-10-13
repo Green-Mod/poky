@@ -60,6 +60,14 @@ def cached_mtime_noerror(f):
             return 0
     return __mtime_cache[f]
 
+def check_mtime(f, mtime):
+    try:
+        current_mtime = os.stat(f)[stat.ST_MTIME]
+        __mtime_cache[f] = current_mtime
+    except OSError:
+        current_mtime = 0
+    return current_mtime == mtime
+
 def update_mtime(f):
     try:
         __mtime_cache[f] = os.stat(f)[stat.ST_MTIME]
@@ -71,7 +79,7 @@ def update_mtime(f):
 
 def update_cache(f):
     if f in __mtime_cache:
-        logger.debug(1, "Updating mtime cache for %s" % f)
+        logger.debug("Updating mtime cache for %s" % f)
         update_mtime(f)
 
 def clear_cache():
@@ -99,12 +107,12 @@ def supports(fn, data):
             return 1
     return 0
 
-def handle(fn, data, include = 0):
+def handle(fn, data, include=0, baseconfig=False):
     """Call the handler that is appropriate for this file"""
     for h in handlers:
         if h['supports'](fn, data):
             with data.inchistory.include(fn):
-                return h['handle'](fn, data, include)
+                return h['handle'](fn, data, include, baseconfig)
     raise ParseError("not a BitBake file", fn)
 
 def init(fn, data):
@@ -113,6 +121,8 @@ def init(fn, data):
             return h['init'](data)
 
 def init_parser(d):
+    if hasattr(bb.parse, "siggen"):
+        bb.parse.siggen.exit()
     bb.parse.siggen = bb.siggen.init(d)
 
 def resolve_file(fn, d):
